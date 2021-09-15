@@ -37,34 +37,74 @@
 #define  INCLUDE_FROM_BULKVENDOR_C
 #include "BulkVendor.h"
 
+#define STK500_HEADER_SIZE 5
+#define STK500_BODY_SIZE 275
+#define STK500_CHECKSUM 1
+#define STK500_PACKET_SIZE (STK500_HEADER_SIZE+STK500_BODY_SIZE+STK500_CHECKSUM)
+#define MESSAGE_START 0x1B
+#define TOKEN 0x0E
+
+#define TX_BUFFER_EMPTY (0xFFFF)
+
+static uint8_t      buf[STK500_PACKET_SIZE];
+volatile uint16_t    uart_txp = TX_BUFFER_EMPTY;
+volatile uint16_t    bufp = 0;
 
 /** Main program entry point. This routine configures the hardware required by the application, then
  *  enters a loop to run the application tasks in sequence.
  */
 int main(void)
 {
+	buf[0] = MESSAGE_START;
+	buf[1] = 1; // no use
+	buf[4] = TOKEN;
 	SetupHardware();
 
-	LEDs_SetAllLEDs(LEDMASK_USB_NOTREADY);
 	GlobalInterruptEnable();
 
 	for (;;)
 	{
 		USB_USBTask();
+		Serial_Task();
+	}
+}
 
-		uint8_t ReceivedData[VENDOR_IO_EPSIZE];
-		memset(ReceivedData, 0x00, sizeof(ReceivedData));
+void Serial_Task(void)
+{
+	Endpoint_SelectEndpoint(VENDOR_OUT_EPADDR);
 
-		Endpoint_SelectEndpoint(VENDOR_OUT_EPADDR);
-		if (Endpoint_IsOUTReceived())
+	if (Endpoint_IsOUTReceived())
+	{
+		uint16_t i = 0;
+
+		while (Endpoint_Read_Stream_LE(buf + STK500_HEADER_SIZE, STK500_BODY_SIZE, &i) == ENDPOINT_RWSTREAM_IncompleteTransfer)
 		{
-			Endpoint_Read_Stream_LE(ReceivedData, VENDOR_IO_EPSIZE, NULL);
-			Endpoint_ClearOUT();
-
-			Endpoint_SelectEndpoint(VENDOR_IN_EPADDR);
-			Endpoint_Write_Stream_LE(ReceivedData, VENDOR_IO_EPSIZE, NULL);
-			Endpoint_ClearIN();
 		}
+		Endpoint_ClearOUT();
+
+		buf[2] = (i >> 8);
+		buf[3] = (i & 0xFF);
+		uart_txp = i + STK500_HEADER_SIZE;
+		buf[uart_txp] = 0;
+		for (i = 0; i < uart_txp; i++)
+		{
+			buf[uart_txp] ^= buf[i];
+		}
+		bufp = 0;
+		UCSR1B |= (1 << UDRIE1);
+	}
+
+	if (uart_txp == TX_BUFFER_EMPTY && (buf[2] << 8) + buf[3] + STK500_HEADER_SIZE + STK500_CHECKSUM == bufp)
+	{
+		uint16_t i = 0;
+
+		Endpoint_SelectEndpoint(VENDOR_IN_EPADDR);
+		while (Endpoint_Write_Stream_LE(buf + STK500_HEADER_SIZE, bufp - STK500_HEADER_SIZE - STK500_CHECKSUM, &i) == ENDPOINT_RWSTREAM_IncompleteTransfer)
+		{
+		}
+		Endpoint_ClearIN();
+
+		bufp = 0;
 	}
 }
 
@@ -78,20 +118,11 @@ void SetupHardware(void)
 
 	/* Disable clock division */
 	clock_prescale_set(clock_div_1);
-#elif (ARCH == ARCH_XMEGA)
-	/* Start the PLL to multiply the 2MHz RC oscillator to 32MHz and switch the CPU core to run from it */
-	XMEGACLK_StartPLL(CLOCK_SRC_INT_RC2MHZ, 2000000, F_CPU);
-	XMEGACLK_SetCPUClockSource(CLOCK_SRC_PLL);
-
-	/* Start the 32MHz internal RC oscillator and start the DFLL to increase it to 48MHz using the USB SOF as a reference */
-	XMEGACLK_StartInternalOscillator(CLOCK_SRC_INT_RC32MHZ);
-	XMEGACLK_StartDFLL(CLOCK_SRC_INT_RC32MHZ, DFLL_REF_INT_USBSOF, F_USB);
-
-	PMIC.CTRL = PMIC_LOLVLEN_bm | PMIC_MEDLVLEN_bm | PMIC_HILVLEN_bm;
+	Serial_Init(115200, false);
+	UCSR1B = ((1 << RXCIE1) | (1 << TXEN1) | (1 << RXEN1)); // enable RX interrupt
 #endif
 
 	/* Hardware Initialization */
-	LEDs_Init();
 	USB_Init();
 }
 
@@ -99,7 +130,6 @@ void SetupHardware(void)
 void EVENT_USB_Device_Connect(void)
 {
 	/* Indicate USB enumerating */
-	LEDs_SetAllLEDs(LEDMASK_USB_ENUMERATING);
 }
 
 /** Event handler for the USB_Disconnect event. This indicates that the device is no longer connected to a host via
@@ -108,7 +138,6 @@ void EVENT_USB_Device_Connect(void)
 void EVENT_USB_Device_Disconnect(void)
 {
 	/* Indicate USB not ready */
-	LEDs_SetAllLEDs(LEDMASK_USB_NOTREADY);
 }
 
 /** Event handler for the USB_ConfigurationChanged event. This is fired when the host set the current configuration
@@ -123,14 +152,20 @@ void EVENT_USB_Device_ConfigurationChanged(void)
 	ConfigSuccess &= Endpoint_ConfigureEndpoint(VENDOR_OUT_EPADDR, EP_TYPE_BULK, VENDOR_IO_EPSIZE, 1);
 
 	/* Indicate endpoint configuration success or failure */
-	LEDs_SetAllLEDs(ConfigSuccess ? LEDMASK_USB_READY : LEDMASK_USB_ERROR);
 }
 
-/** Event handler for the USB_ControlRequest event. This is used to catch and process control requests sent to
- *  the device from the USB host before passing along unhandled control requests to the library for processing
- *  internally.
- */
-void EVENT_USB_Device_ControlRequest(void)
+ISR(USART1_RX_vect, ISR_BLOCK)
 {
-	// Process vendor specific control requests here
+        buf[bufp++] = UDR1;
+}
+
+ISR(USART1_UDRE_vect, ISR_BLOCK)
+{
+        if (uart_txp != bufp) {
+		UDR1 = buf[bufp++];
+	} else {
+		UCSR1B &= ~(1 << UDRIE1);
+		UDR1 = buf[bufp];
+		uart_txp = TX_BUFFER_EMPTY; bufp = 0;
+	}
 }

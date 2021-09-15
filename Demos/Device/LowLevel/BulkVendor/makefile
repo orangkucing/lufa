@@ -11,10 +11,11 @@
 
 # Run "make help" for target help.
 
-MCU          = at90usb1287
+MCU          = atmega16u2
+#MCU          = atmega32u4
 ARCH         = AVR8
-BOARD        = USBKEY
-F_CPU        = 8000000
+BOARD        = BOARD_NONE
+F_CPU        = 16000000
 F_USB        = $(F_CPU)
 OPTIMIZATION = s
 TARGET       = BulkVendor

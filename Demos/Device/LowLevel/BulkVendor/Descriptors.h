@@ -46,7 +46,7 @@
 		#define VENDOR_IN_EPADDR               (ENDPOINT_DIR_IN  | 3)
 
 		/** Endpoint address of the Bulk Vendor host-to-device data OUT endpoint. */
-		#define VENDOR_OUT_EPADDR              (ENDPOINT_DIR_OUT | 4)
+		#define VENDOR_OUT_EPADDR              (ENDPOINT_DIR_OUT | 2)
 
 		/** Size in bytes of the Bulk Vendor data endpoints. */
 		#define VENDOR_IO_EPSIZE               64
